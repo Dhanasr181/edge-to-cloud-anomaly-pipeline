@@ -66,32 +66,22 @@ Once saved, your containers will immediately connect and begin transmitting tele
 
 ---
 
-## Developer Guide for OT Specialists (Azure IoT Integration)
+### 💾 Cosmos DB Integration & Data Engineering Pipeline
 
-If you are writing the core OPC UA PubSub logic (reading from PLCs, formatting data, etc.) in the future, you do **not** need to worry about complex TLS encryption or Azure authentication tokens! The networking foundation has been abstracted for you. 
+Because Azure IoT Hub automatically encodes telemetry strings into binary formatting during direct message routing, the data lands in Cosmos DB with its core payload hidden inside a Base64 string. 
 
-Here is the "Common Code" integration knowledge you need to integrate your future C applications into this Azure IoT Hub pipeline:
+The analytical layer in Databricks handles this by bypassing third-party UI connectors and executing a programmatic extraction pipeline.
 
-### 1. Azure Authentication (Already Handled)
-We modified the core networking layer in open62541/arch/common/eventloop_mqtt.c. It automatically pulls the IOT_DEVICE_ID and IOT_HUB_NAME environment variables and formats them into the strict MQTT Username that Azure IoT Hub demands:
-[HubName]/[DeviceId]/?api-version=2021-04-12
+#### 1. Raw Document Ingestion Format
+Data is read natively from the Unity Catalog Volume as a JSON array. A typical wrapper document lands in the `Telemetry` container with the following structural layout:
 
-Because of this, your C code simply connects to 127.0.0.1:1883 (which is routed through our stunnel TLS proxy) without needing any passwords or SAS tokens in your C code!
+* **System Metadata:** Tracks internal parameters (`id`, `_ts`, `SystemProperties`) generated during the IoT Hub ingestion path.
+* **Encrypted Payload Storage:** The raw open62541 variables are contained inside the **`Body`** column as an encrypted Base64 string block: `"eyJNZXNzYWdlSWQiOm51bGwsIk1lc3Nh..."`
 
-### 2. The Publisher Topic (Telemetry)
-When writing your publisher code (like 	utorial_pubsub_mqtt_publish.c), Azure strictly mandates what MQTT topic you publish to. 
-Your publishing topic **must** be formatted like this:
-`c
-// Replace device2 with your actual device ID (or read it dynamically)
-UA_String topic = UA_String("devices/device2/messages/events/");
-`
+#### 2. Programmatic Processing Steps
+To convert this raw document stream into a valid machine learning matrix, the Databricks pipeline processes the telemetry through four distinct stages:
 
-### 3. The Subscriber Topic (Cloud-to-Device Commands)
-If you are writing logic to listen for commands *from* the Azure cloud to control local PLCs (like 	utorial_pubsub_mqtt_subscribe.c), you must subscribe to this specific wildcard topic:
-`c
-// Replace device2-sub with your actual device ID
-UA_String topic = UA_String("devices/device2-sub/messages/devicebound/#");
-`
-
-### 4. Payload Format
-Azure IoT Hub expects the payload to be a valid JSON string. As long as you use the UA_ENABLE_JSON_ENCODING flag when building the open62541 PubSub dataset writer, the telemetry will be natively parsed by Azure IoT Hub, IoT Explorer, and Azure Stream Analytics.
+1. **Multiline Parsing:** Instructs the Spark engine to ingest the target file as a unified array array structure rather than individual standalone lines (`.option("multiline", "true")`).
+2. **Base64 Decryption:** Executes the native Spark `unbase64(col("Body"))` function directly inside the JVM, casting the binary array output back into clean, human-readable JSON string text.
+3. **Strict Schema Mapping:** Applies an explicit, custom Apache Spark `StructType` schema representing the official open62541 message payload pattern. This prevents runtime processing exceptions if malformed edge packets enter the pipeline.
+4. **Data Flattening Matrix:** Extracts specific array indices out of the nested JSON structure (`col("ParsedData.Messages")[0]["Payload"]...`) and surfaces them into flat, queryable columns (`temperature`, `pressure`, `vibration`) optimized for feature scaling algorithms.
